@@ -44,7 +44,8 @@ class pinnable_mapped_file {
       enum map_mode {
          mapped,
          heap,
-         locked
+         locked,
+         anonymous_shared_memory
       };
 
       pinnable_mapped_file(const bfs::path& dir, bool writable, uint64_t shared_file_size, bool allow_dirty, map_mode mode);
