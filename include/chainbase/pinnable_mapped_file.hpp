@@ -48,7 +48,13 @@ class pinnable_mapped_file {
          anonymous_shared_memory
       };
 
-      pinnable_mapped_file(const bfs::path& dir, bool writable, uint64_t shared_file_size, bool allow_dirty, map_mode mode);
+      enum class on_dirty_mode {
+         throw_on_dirty,
+         allow_dirty,
+         delete_on_dirty
+      };
+      
+      pinnable_mapped_file(const bfs::path& dir, bool writable, uint64_t shared_file_size, on_dirty_mode on_dirty, map_mode mode);
       pinnable_mapped_file(pinnable_mapped_file&& o);
       pinnable_mapped_file& operator=(pinnable_mapped_file&&);
       pinnable_mapped_file(const pinnable_mapped_file&) = delete;

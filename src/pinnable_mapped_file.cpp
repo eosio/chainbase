@@ -49,7 +49,7 @@ const std::error_category& chainbase_error_category() {
    return the_category;
 }
 
-pinnable_mapped_file::pinnable_mapped_file(const bfs::path& dir, bool writable, uint64_t shared_file_size, bool allow_dirty, map_mode mode) :
+pinnable_mapped_file::pinnable_mapped_file(const bfs::path& dir, bool writable, uint64_t shared_file_size, on_dirty_mode on_dirty, map_mode mode) :
    _data_file_path(mode != anonymous_shared_memory ? bfs::absolute(dir/"shared_memory.bin") : ""),
    _database_name(dir.filename().string()),
    _writable(writable)
@@ -81,25 +81,39 @@ pinnable_mapped_file::pinnable_mapped_file(const bfs::path& dir, bool writable, 
       char header[header_size];
       std::ifstream hs(_data_file_path.generic_string(), std::ifstream::binary);
       hs.read(header, header_size);
-      if(hs.fail())
-         BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::bad_header)));
-
-      db_header* dbheader = reinterpret_cast<db_header*>(header);
-      if(dbheader->id != header_id) {
-         std::string what_str("\"" + _database_name + "\" database format not compatible with this version of chainbase.");
-         BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::incorrect_db_version), what_str));
+      if (hs.fail()) {
+         if (on_dirty == on_dirty_mode::delete_on_dirty) {
+            bfs::remove(_data_file_path);
+            std::cerr << "CHAINBASE: \"" << _database_name
+                      << "\" database header is corrupted, delete the existing one and continue\n";
+         } else {
+            BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::bad_header)));
+         }
       }
-      if(!allow_dirty && dbheader->dirty) {
-         std::string what_str("\"" + _database_name + "\" database dirty flag set");
-         BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::dirty)));
-      }
-      if(dbheader->dbenviron != environment()) {
-         std::cerr << "CHAINBASE: \"" << _database_name << "\" database was created with a chainbase from a different environment" << std::endl;
-         std::cerr << "Current compiler environment:" << std::endl;
-         std::cerr << environment();
-         std::cerr << "DB created with compiler environment:" << std::endl;
-         std::cerr << dbheader->dbenviron;
-         BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::incompatible)));
+      else {   
+         db_header* dbheader = reinterpret_cast<db_header*>(header);
+         if(dbheader->id != header_id) {
+            std::string what_str("\"" + _database_name + "\" database format not compatible with this version of chainbase.");
+            BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::incorrect_db_version), what_str));
+         }
+         if (dbheader->dirty) {
+            if (on_dirty == on_dirty_mode::throw_on_dirty) {
+               std::string what_str("\"" + _database_name + "\" database dirty flag set");
+               BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::dirty)));
+            } else if (on_dirty == on_dirty_mode::delete_on_dirty)  {
+               bfs::remove(_data_file_path);
+               std::cerr << "CHAINBASE: \"" << _database_name
+                        << "\" database is dirty, delete the existing one and continue\n";
+            }
+         }
+         else if(dbheader->dbenviron != environment()) {
+            std::cerr << "CHAINBASE: \"" << _database_name << "\" database was created with a chainbase from a different environment" << std::endl;
+            std::cerr << "Current compiler environment:" << std::endl;
+            std::cerr << environment();
+            std::cerr << "DB created with compiler environment:" << std::endl;
+            std::cerr << dbheader->dbenviron;
+            BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::incompatible)));
+         }
       }
    }
 
