@@ -608,15 +608,18 @@ namespace chainbase {
 
       // Resets the contents to the state at the top of the undo stack.
       void undo() noexcept {
+         ilog("undo_index::undo");
          if (_undo_stack.empty()) return;
          undo_state& undo_info = _undo_stack.back();
          // erase all new_ids
          auto& by_id = std::get<0>(_indices);
          auto new_ids_iter = by_id.lower_bound(undo_info.old_next_id);
+         ilog("before erase_and_dispose");
          by_id.erase_and_dispose(new_ids_iter, by_id.end(), [this](pointer p){
             erase_impl<1>(*p);
             dispose_node(*p);
          });
+         ilog("after erase_and_dispose");
          // replace old_values
          _old_values.erase_after_and_dispose(_old_values.before_begin(), get_old_values_end(undo_info), [this, &undo_info](pointer p) {
             auto restored_mtime = to_old_node(*p)._mtime;
@@ -637,6 +640,7 @@ namespace chainbase {
             }
             dispose_old(*p);
          });
+         ilog("after _old_values.erase_after_and_dispose");
          // insert all removed_values
          _removed_values.erase_after_and_dispose(_removed_values.before_begin(), get_removed_values_end(undo_info), [this, &undo_info](pointer p) {
             if (p->id < undo_info.old_next_id) {
@@ -646,8 +650,10 @@ namespace chainbase {
                dispose_node(*p);
             }
          });
+         ilog("after _removed_values.erase_after_and_dispose");
          _next_id = undo_info.old_next_id;
          _undo_stack.pop_back();
+         ilog("after _undo_stack.pop_back");
          --_revision;
       }
 
