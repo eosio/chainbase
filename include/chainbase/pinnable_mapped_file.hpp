@@ -44,8 +44,7 @@ class pinnable_mapped_file {
       enum map_mode {
          mapped,
          heap,
-         locked,
-         anonymous_shared_memory
+         locked
       };
 
       enum class on_dirty_mode {

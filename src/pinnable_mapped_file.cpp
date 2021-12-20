@@ -1,7 +1,6 @@
 #include <chainbase/pinnable_mapped_file.hpp>
 #include <chainbase/environment.hpp>
 #include <boost/interprocess/managed_external_buffer.hpp>
-#include <boost/interprocess/anonymous_shared_memory.hpp>
 #include <boost/asio/signal_set.hpp>
 #include <iostream>
 
@@ -50,7 +49,7 @@ const std::error_category& chainbase_error_category() {
 }
 
 pinnable_mapped_file::pinnable_mapped_file(const bfs::path& dir, bool writable, uint64_t shared_file_size, on_dirty_mode on_dirty, map_mode mode) :
-   _data_file_path(mode != anonymous_shared_memory ? bfs::absolute(dir/"shared_memory.bin") : ""),
+   _data_file_path(bfs::absolute(dir/"shared_memory.bin")),
    _database_name(dir.filename().string()),
    _writable(writable)
 {
@@ -59,13 +58,6 @@ pinnable_mapped_file::pinnable_mapped_file(const bfs::path& dir, bool writable, 
       BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::bad_size), what_str));
    }
 
-   if (mode == anonymous_shared_memory) {
-      _file_mapped_region = bip::anonymous_shared_memory(shared_file_size);
-      _segment_manager = new ((char*)_file_mapped_region.get_address()+header_size) segment_manager(shared_file_size-header_size);
-      new (_file_mapped_region.get_address()) db_header;
-      return;
-   }
-   
 #ifdef _WIN32
    if(mode != mapped)
       BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::unsupported_win32_mode)));
