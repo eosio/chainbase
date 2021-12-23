@@ -60,14 +60,13 @@ class pinnable_mapped_file {
       pinnable_mapped_file& operator=(const pinnable_mapped_file&) = delete;
       ~pinnable_mapped_file();
 
-      segment_manager* get_segment_manager() const { return _segment_manager;}
+      segment_manager* get_segment_manager() const { return _segment_manager; }
+
+      void grow(double factor);
 
    private:
-      void                                          set_mapped_file_db_dirty(bool);
-      void                                          load_database_file(boost::asio::io_service& sig_ios);
-      void                                          save_database_file();
-      bool                                          all_zeros(char* data, size_t sz);
-      void                                          setup_non_file_mapping();
+      void                                          load_database_file(boost::asio::io_service& sig_ios, const bip::mapped_region& file_mapped_region);
+      bip::mapped_region                            save_database_file();
 
       bip::file_lock                                _mapped_file_lock;
       bfs::path                                     _data_file_path;
@@ -75,9 +74,8 @@ class pinnable_mapped_file {
       bool                                          _writable;
 
       bip::file_mapping                             _file_mapping;
-      bip::mapped_region                            _file_mapped_region;
-      void*                                         _non_file_mapped_mapping = nullptr;
-      size_t                                        _non_file_mapped_mapping_size = 0;
+      bip::mapped_region                            _mapped_region;
+      map_mode                                      _mode = mapped;
 
 #ifdef _WIN32
       bip::permissions                              _db_permissions;
@@ -87,7 +85,6 @@ class pinnable_mapped_file {
 
       segment_manager*                              _segment_manager = nullptr;
 
-      constexpr static unsigned                     _db_size_multiple_requirement = 1024*1024; //1MB
 };
 
 std::istream& operator>>(std::istream& in, pinnable_mapped_file::map_mode& runtime);
