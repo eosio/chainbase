@@ -53,7 +53,7 @@ class pinnable_mapped_file {
          delete_on_dirty
       };
       
-      pinnable_mapped_file(const bfs::path& dir, bool writable, uint64_t shared_file_size, on_dirty_mode on_dirty, map_mode mode);
+      pinnable_mapped_file(const bfs::path& dir, bool writable, uint64_t shared_file_size, on_dirty_mode on_dirty, map_mode mode, bool save_on_exit);
       pinnable_mapped_file(pinnable_mapped_file&& o);
       pinnable_mapped_file& operator=(pinnable_mapped_file&&);
       pinnable_mapped_file(const pinnable_mapped_file&) = delete;
@@ -62,11 +62,10 @@ class pinnable_mapped_file {
 
       segment_manager* get_segment_manager() const { return _segment_manager; }
 
-      void grow(double factor);
+      void grow(std::size_t grow_size);
 
    private:
-      void                                          load_database_file(boost::asio::io_service& sig_ios, const bip::mapped_region& file_mapped_region);
-      bip::mapped_region                            save_database_file();
+      void                                          save_database_file();
 
       bip::file_lock                                _mapped_file_lock;
       bfs::path                                     _data_file_path;
@@ -75,15 +74,17 @@ class pinnable_mapped_file {
 
       bip::file_mapping                             _file_mapping;
       bip::mapped_region                            _mapped_region;
-      map_mode                                      _mode = mapped;
-
+      
 #ifdef _WIN32
       bip::permissions                              _db_permissions;
 #else
       bip::permissions                              _db_permissions{S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH};
 #endif
 
-      segment_manager*                              _segment_manager = nullptr;
+      segment_manager* _segment_manager = nullptr;
+      map_mode                                      _mode = mapped;
+      std::size_t                                   _mapped_region_max_size;
+      bool                                          _save_on_exit;
 
 };
 

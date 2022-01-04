@@ -261,7 +261,8 @@ namespace chainbase {
 
          database(const bfs::path& dir, open_flags write = read_only, uint64_t shared_file_size = 0,
                   pinnable_mapped_file::on_dirty_mode on_dirty = pinnable_mapped_file::on_dirty_mode::throw_on_dirty,
-                  pinnable_mapped_file::map_mode = pinnable_mapped_file::map_mode::mapped);
+                  pinnable_mapped_file::map_mode               = pinnable_mapped_file::map_mode::mapped,
+                  bool save_on_exit                            = true);
          ~database();
          database(database&&) = default;
          database& operator=(database&&) = default;

@@ -54,24 +54,17 @@ const std::error_category& chainbase_error_category() {
 constexpr static unsigned db_size_multiple_requirement = 1024*1024; //1MB
 
 #if defined(MAP_HUGETLB) && defined(MAP_HUGE_1GB)
-static constexpr int mmap_huge_page_flag = MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_HUGE_1GB;
-static constexpr int mmap_huge_page_fd   = -1;
+static constexpr bip::map_options_t huge_page_flag = MAP_HUGETLB | MAP_HUGE_1GB;
 static constexpr uint64_t huge_page_size = 1u<<30u; // 1GB
 #elif defined(MAP_HUGETLB) && defined(MAP_HUGE_2MB)
-static constexpr int mmap_huge_page_flag   = MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_HUGE_2MB;
-static constexpr int mmap_huge_page_fd = -1;
-static constexpr uint64_t huge_page_size = 1u<<21u; // 2MB
-#elif defined(VM_FLAGS_SUPERPAGE_SIZE_2MB)
-static constexpr int mmap_huge_page_flag = MAP_PRIVATE | MAP_ANONYMOUS;
-static constexpr int mmap_huge_page_fd = VM_FLAGS_SUPERPAGE_SIZE_2MB;
+static constexpr bip::map_options_t huge_page_flag  = MAP_HUGETLB | MAP_HUGE_2MB;
 static constexpr uint64_t huge_page_size = 1u<<21u; // 2MB
 #else
-static constexpr int mmap_huge_page_flag = MAP_PRIVATE | MAP_ANONYMOUS;
-static constexpr int mmap_huge_page_fd = -1;
+static constexpr bip::map_options_t huge_page_flag = bip::default_map_options;
 static constexpr uint64_t huge_page_size = 1u<<20u; // 1MB
 #endif
 
-uint64_t round_up_mmaped_size(uint64_t size) {
+uint64_t roundup_mmaped_size(uint64_t size) {
    return (size + (huge_page_size-1u))/huge_page_size*huge_page_size;
 };
 
@@ -86,43 +79,16 @@ void lock_region(const std::string& database_name, bip::mapped_region& mapped_re
 #endif
 }
 
-bip::mapped_region setup_memory_region(const std::string& database_name, uint64_t size) {
-#ifndef _WIN32
-   
-   void* new_addr = mmap(NULL, size, PROT_READ|PROT_WRITE, mmap_huge_page_flag, mmap_huge_page_fd, 0);
-   if(new_addr == MAP_FAILED)
-      BOOST_THROW_EXCEPTION(
-          std::runtime_error(std::string("Failed to map database ") + database_name + ": " + strerror(errno)));
-   return bip::ipcdetail::raw_mapped_region_creator::create_posix_mapped_region (new_addr, size);
-#else
-   using namespace bip;
-   windows_shared_memory anonymous_mapping(create_only, (char*)0, read_write, size);
-   return mapped_region(anonymous_mapping, read_write, 0, size, address);
-#endif
-}
-
-void grow_memory_region(const std::string& database_name, bip::mapped_region& region, uint64_t size) {
-#if defined(MREMAP_MAYMOVE)
-   new_addr = mremap(region.get_address(), existing_size, new_size, MREMAP_MAYMOVE);
-
-   if (new_addr == MAP_FAILED)
-      BOOST_THROW_EXCEPTION(
-            std::runtime_error(std::string("Failed to grow database ") + database_name + ": " + strerror(errno)));
-   region = bip::ipcdetail::raw_mapped_region_creator::create_posix_mapped_region(new_addr, new_size);
-#else
-   auto new_region = setup_memory_region(database_name, size);
-   memmove(new_region.get_address(), region.get_address(), region.get_size());
-   region = std::move(new_region);
-#endif
-}
-
 void set_mapped_file_db_dirty(bip::mapped_region& file_mapped_region, bool dirty);
 
-pinnable_mapped_file::pinnable_mapped_file(const bfs::path& dir, bool writable, uint64_t shared_file_size, on_dirty_mode on_dirty, map_mode mode) :
-   _data_file_path(bfs::absolute(dir/"shared_memory.bin")),
-   _database_name(dir.filename().string()),
-   _writable(writable),
-   _mode(mode)
+pinnable_mapped_file::pinnable_mapped_file(const bfs::path& dir, bool writable, uint64_t shared_file_size,
+                                           on_dirty_mode on_dirty, map_mode mode, bool save_on_exit)
+    : _data_file_path(bfs::absolute(dir / "shared_memory.bin"))
+    , _database_name(dir.filename().string())
+    , _writable(writable)
+    , _mode(mode)
+    , _save_on_exit(save_on_exit && mode != mapped)
+    
 {
    if(shared_file_size % db_size_multiple_requirement) {
       std::string what_str("Database must be multiple of " + std::to_string(db_size_multiple_requirement) + " bytes");
@@ -180,13 +146,19 @@ pinnable_mapped_file::pinnable_mapped_file(const bfs::path& dir, bool writable, 
       }
    }
 
-   if(!bfs::exists(_data_file_path)) {
-      std::ofstream ofs(_data_file_path.generic_string(), std::ofstream::trunc);
-      //win32 impl of bfs::resize_file() doesn't like the file being open
-      ofs.close();
-      bfs::resize_file(_data_file_path, shared_file_size);
-      _file_mapping = bip::file_mapping(_data_file_path.generic_string().c_str(), bip::read_write);
-      _mapped_region = bip::mapped_region(_file_mapping, bip::read_write);
+   auto region_mode = (mode == mapped) ? bip::read_write : bip::copy_on_write;
+   _mapped_region_max_size = roundup_mmaped_size(shared_file_size);
+   
+   if (!bfs::exists(_data_file_path)) {
+      if (mode == mapped) {
+         std::ofstream ofs(_data_file_path.generic_string(), std::ofstream::trunc);
+         //win32 impl of bfs::resize_file() doesn't like the file being open
+         ofs.close();
+         bfs::resize_file(_data_file_path, shared_file_size);
+         _file_mapping = bip::file_mapping(_data_file_path.generic_string().c_str(), bip::read_write);
+      } 
+
+      _mapped_region = bip::mapped_region(_file_mapping, region_mode, 0, _mapped_region_max_size, nullptr, huge_page_flag);
       new ((char*)_mapped_region.get_address()+header_size) segment_manager(shared_file_size-header_size);
       new (_mapped_region.get_address()) db_header;
    }
@@ -203,15 +175,17 @@ pinnable_mapped_file::pinnable_mapped_file(const bfs::path& dir, bool writable, 
                 "remain at " << existing_file_size << std::endl;
          }
          _file_mapping = bip::file_mapping(_data_file_path.generic_string().c_str(), bip::read_write);
-         _mapped_region = bip::mapped_region(_file_mapping, bip::read_write);
+         _mapped_region = bip::mapped_region(_file_mapping, region_mode, 0, _mapped_region_max_size, nullptr, huge_page_flag);
          segment_manager* file_mapped_segment_manager = reinterpret_cast<segment_manager*>((char*)_mapped_region.get_address()+header_size);
          if(grow)
             file_mapped_segment_manager->grow(grow);
    }
    else {
          _file_mapping = bip::file_mapping(_data_file_path.generic_string().c_str(), bip::read_only);
-         _mapped_region = bip::mapped_region(_file_mapping, bip::read_only);
+         _mapped_region = bip::mapped_region(_file_mapping, bip::read_only, 0, _mapped_region_max_size, nullptr, huge_page_flag);
    }
+
+   if (_mode == locked) lock_region(_database_name, _mapped_region);
 
    if(_writable) {
       //remove meta file created in earlier versions
@@ -225,51 +199,7 @@ pinnable_mapped_file::pinnable_mapped_file(const bfs::path& dir, bool writable, 
       set_mapped_file_db_dirty(_mapped_region, true);
    }
 
-   if (mode != mapped) {
-      boost::asio::io_service sig_ios;
-      boost::asio::signal_set sig_set(sig_ios, SIGINT, SIGTERM);
-#ifdef SIGPIPE
-      sig_set.add(SIGPIPE);
-#endif
-      sig_set.async_wait([](const boost::system::error_code&, int) {
-         BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::aborted)));
-      });
-
-      auto file_mapped_region = std::move(_mapped_region);
-
-      try {
-         _mapped_region = setup_memory_region(_database_name, round_up_mmaped_size(shared_file_size));
-         load_database_file(sig_ios, file_mapped_region);
-         if (_mode == locked) lock_region(_database_name, _mapped_region);
-      }
-      catch(...) {
-         if(_writable)
-            set_mapped_file_db_dirty(file_mapped_region, false);
-         throw;
-      }
-   }
    _segment_manager = reinterpret_cast<segment_manager*>((char*)_mapped_region.get_address()+header_size);
-}
-
-
-
-void pinnable_mapped_file::load_database_file(boost::asio::io_service& sig_ios, const bip::mapped_region& file_mapped_region) {
-   std::cerr << "CHAINBASE: Preloading \"" << _database_name << "\" database file, this could take a moment..." << std::endl;
-   char* const src = (char*)file_mapped_region.get_address();
-   char* const dst = (char*)_mapped_region.get_address();
-   size_t offset = 0;
-   time_t t = time(nullptr);
-   while(offset != file_mapped_region.get_size()) {
-      memcpy(dst+offset, src+offset, db_size_multiple_requirement);
-      offset += db_size_multiple_requirement;
-
-      if(time(nullptr) != t) {
-         t = time(nullptr);
-         std::cerr << "              " << offset/(file_mapped_region.get_size()/100) << "% complete..." << std::endl;
-      }
-      sig_ios.poll();
-   }
-   std::cerr << "           Complete" << std::endl;
 }
 
 bool all_zeros(char* data, size_t sz) {
@@ -282,8 +212,8 @@ bool all_zeros(char* data, size_t sz) {
    return true;
 }
 
-bip::mapped_region pinnable_mapped_file::save_database_file() {
-   ftruncate(_file_mapping.get_mapping_handle().handle, _mapped_region.get_size());
+void pinnable_mapped_file::save_database_file() {
+   boost::filesystem::resize_file(_data_file_path, _mapped_region.get_size());
    auto file_mapped_region = bip::mapped_region(_file_mapping, bip::read_write);
    std::cerr << "CHAINBASE: Writing \"" << _database_name << "\" database file, this could take a moment..." << std::endl;
    char* src = (char*)_mapped_region.get_address();
@@ -304,7 +234,7 @@ bip::mapped_region pinnable_mapped_file::save_database_file() {
    if(file_mapped_region.flush(0, 0, false) == false)
       std::cerr << "CHAINBASE: ERROR: syncing buffers failed" << std::endl;
    std::cerr << "           Complete" << std::endl;
-   return file_mapped_region;
+   _mapped_region = std::move(file_mapped_region);
 }
 
 pinnable_mapped_file::pinnable_mapped_file(pinnable_mapped_file&& o) :
@@ -312,7 +242,8 @@ pinnable_mapped_file::pinnable_mapped_file(pinnable_mapped_file&& o) :
    _data_file_path(std::move(o._data_file_path)),
    _database_name(std::move(o._database_name)),
    _mapped_region(std::move(o._mapped_region)),
-   _mode(o._mode)
+   _mode(o._mode),
+   _save_on_exit(o._save_on_exit)
 {
    _segment_manager = o._segment_manager;
    _writable = o._writable;
@@ -327,20 +258,16 @@ pinnable_mapped_file& pinnable_mapped_file::operator=(pinnable_mapped_file&& o) 
    _segment_manager = o._segment_manager;
    _writable = o._writable;
    o._writable = false; //prevent dtor from doing anything interesting
-   _mode = o._mode;
+   _mode               = o._mode;
+   _mapped_region_max_size = o._mapped_region_max_size;
+   _save_on_exit = o._save_on_exit;
    return *this;
 }
 
 pinnable_mapped_file::~pinnable_mapped_file() {
    if (_writable) {
-      auto file_mapped_region = (_mode == mapped) ? std::move(_mapped_region) : save_database_file();
-      
-      if(_mode == mapped && file_mapped_region.flush(0, 0, false) == false) {
-         std::cerr << "CHAINBASE: ERROR: syncing buffers failed" << std::endl;
-         return;
-      }
-
-      set_mapped_file_db_dirty(file_mapped_region, false);
+      if (_save_on_exit) save_database_file();
+      set_mapped_file_db_dirty(_mapped_region, false);
    }
 }
 
@@ -350,32 +277,30 @@ void set_mapped_file_db_dirty(bip::mapped_region& file_mapped_region, bool dirty
       std::cerr << "CHAINBASE: ERROR: syncing buffers failed" << std::endl;
 }
 
-void pinnable_mapped_file::grow(double factor) {
-   if (_writable && factor > 1) {
+void pinnable_mapped_file::grow(std::size_t grow_size) {
+   if (_writable && grow_size > 0) {
       auto existing_size = _mapped_region.get_size();
-      auto new_size = round_up_mmaped_size(existing_size * factor);
-      size_t grow_size     = new_size - existing_size;
+      auto new_size      = roundup_mmaped_size(existing_size + grow_size);
+      grow_size          = new_size - existing_size;
 
-      if (_mode != mapped) {
-         grow_memory_region(_database_name, _mapped_region, new_size);
+      if (_mode == mapped) boost::filesystem::resize_file(_data_file_path, _mapped_region.get_size());
 
-#if !defined(MREMAP_MAYMOVE)
-         if (_mode == locked) lock_region(_database_name, _mapped_region);
-#endif 
-      }
-      else {
-         ftruncate(_file_mapping.get_mapping_handle().handle, new_size);
-#ifdef MREMAP_MAYMOVE
-         void* new_addr =
-            mremap(_mapped_region.get_address(), existing_size, new_size, MREMAP_MAYMOVE);
-         if (new_addr == MAP_FAILED)
-            BOOST_THROW_EXCEPTION(
-               std::runtime_error(std::string("Failed to mremap database ") + _database_name + ": " + strerror(errno)));
-         _mapped_region = bip::ipcdetail::raw_mapped_region_creator::create_posix_mapped_region(new_addr, new_size);
+#if defined(MREMAP_MAYMOVE)
+      new_addr = mremap(region.get_address(), _mapped_region_max_size , new_size, MREMAP_MAYMOVE);
+
+      if (new_addr == MAP_FAILED)
+         BOOST_THROW_EXCEPTION(
+               std::runtime_error(std::string("Failed to grow database ") + _database_name + ": " + strerror(errno)));
+      region = bip::ipcdetail::raw_mapped_region_creator::create_posix_mapped_region(new_addr, new_size);
+      if (_mode == locked) lock_region(_database_name, _mapped_region);
 #else
-         _mapped_region = bip::mapped_region(_file_mapping, bip::read_write);
+      auto region_mode = (_mode == mapped) ? bip::read_write : bip::copy_on_write;
+      auto new_region = bip::mapped_region(_file_mapping, region_mode, 0, new_size, nullptr, huge_page_flag);
+      memmove(new_region.get_address(), _mapped_region.get_address(), new_size);
+      _mapped_region = std::move(new_region);
 #endif
-      }
+      _mapped_region_max_size = new_size;
+      
       _segment_manager =
             reinterpret_cast<segment_manager*>((char*)_mapped_region.get_address() + header_size);
       _segment_manager->grow(grow_size);
