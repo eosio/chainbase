@@ -42,9 +42,11 @@ class pinnable_mapped_file {
       typedef typename bip::managed_mapped_file::segment_manager segment_manager;
 
       enum map_mode {
-         mapped,
-         heap,
-         locked
+        mapped,
+        heap,
+        locked,
+        ram,
+        ram_locked
       };
 
       enum class on_dirty_mode {
@@ -67,8 +69,7 @@ class pinnable_mapped_file {
       void                                          load_database_file(boost::asio::io_service& sig_ios);
       void                                          save_database_file();
       bool                                          all_zeros(char* data, size_t sz);
-      void                                          setup_non_file_mapping();
-
+      bip::mapped_region                            setup_non_file_region();
       bip::file_lock                                _mapped_file_lock;
       bfs::path                                     _data_file_path;
       std::string                                   _database_name;
@@ -76,8 +77,7 @@ class pinnable_mapped_file {
 
       bip::file_mapping                             _file_mapping;
       bip::mapped_region                            _file_mapped_region;
-      void*                                         _non_file_mapped_mapping = nullptr;
-      size_t                                        _non_file_mapped_mapping_size = 0;
+      bip::mapped_region                            _non_file_mapped_region;
 
 #ifdef _WIN32
       bip::permissions                              _db_permissions;
@@ -86,6 +86,7 @@ class pinnable_mapped_file {
 #endif
 
       segment_manager*                              _segment_manager = nullptr;
+      map_mode                                      _mode;
 
       constexpr static unsigned                     _db_size_multiple_requirement = 1024*1024; //1MB
 };

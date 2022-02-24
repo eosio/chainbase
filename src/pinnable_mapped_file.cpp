@@ -1,8 +1,13 @@
 #include <chainbase/pinnable_mapped_file.hpp>
 #include <chainbase/environment.hpp>
 #include <boost/interprocess/managed_external_buffer.hpp>
+#include <boost/interprocess/anonymous_shared_memory.hpp>
 #include <boost/asio/signal_set.hpp>
 #include <iostream>
+
+#ifdef _WIN32
+#include <boost/interprocess/windows_shared_memory.hpp>
+#endif
 
 #ifdef __linux__
 #include <linux/mman.h>
@@ -48,20 +53,35 @@ const std::error_category& chainbase_error_category() {
    return the_category;
 }
 
+void lock_region(bip::mapped_region &region, const std::string& _database_name) {
+#ifndef _WIN32
+   if(mlock(region.get_address(), region.get_size())) { 
+      std::string what_str("Failed to mlock database \"" + _database_name + "\"");
+      BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::no_mlock), what_str));
+   }
+   std::cerr << "CHAINBASE: Database \"" << _database_name << "\" has been successfully locked in memory" << std::endl;
+#endif  
+}
+
 pinnable_mapped_file::pinnable_mapped_file(const bfs::path& dir, bool writable, uint64_t shared_file_size, on_dirty_mode on_dirty, map_mode mode) :
-   _data_file_path(bfs::absolute(dir/"shared_memory.bin")),
+   _data_file_path(mode != ram && mode != ram_locked ? bfs::absolute(dir/"shared_memory.bin") : ""),
    _database_name(dir.filename().string()),
-   _writable(writable)
+   _writable(writable),
+   _mode(mode)
 {
    if(shared_file_size % _db_size_multiple_requirement) {
-      std::string what_str("Database must be mulitple of " + std::to_string(_db_size_multiple_requirement) + " bytes");
+      std::string what_str("Database must be multiple of " + std::to_string(_db_size_multiple_requirement) + " bytes");
       BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::bad_size), what_str));
    }
 
-#ifdef _WIN32
-   if(mode != mapped)
-      BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::unsupported_win32_mode)));
-#endif
+   if (mode == ram || mode == ram_locked) {
+      _non_file_mapped_region = setup_non_file_region();
+      _segment_manager = new ((char*)(char*)_non_file_mapped_region.get_address() + header_size) segment_manager(shared_file_size-header_size);
+      new ((char *)_non_file_mapped_region.get_address()) db_header;
+      if (mode == ram_locked) lock_region(_non_file_mapped_region, _database_name);
+      return;
+   }
+
    if(!_writable && !bfs::exists(_data_file_path)){
       std::string what_str("database file not found at " + _data_file_path.string());
       BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::not_found), what_str));
@@ -170,18 +190,12 @@ pinnable_mapped_file::pinnable_mapped_file(const bfs::path& dir, bool writable, 
       });
 
       try {
-         setup_non_file_mapping();
+         _non_file_mapped_region = setup_non_file_region();
          load_database_file(sig_ios);
 
-#ifndef _WIN32
          if(mode == locked) {
-            if(mlock(_non_file_mapped_mapping, _non_file_mapped_mapping_size)) {
-               std::string what_str("Failed to mlock database \"" + _database_name + "\"");
-               BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::no_mlock), what_str));
-            }
-            std::cerr << "CHAINBASE: Database \"" << _database_name << "\" has been successfully locked in memory" << std::endl;
+            lock_region(_non_file_mapped_region, _database_name);
          }
-#endif
 
          _file_mapped_region = bip::mapped_region();
       }
@@ -191,15 +205,16 @@ pinnable_mapped_file::pinnable_mapped_file(const bfs::path& dir, bool writable, 
          throw;
       }
 
-      _segment_manager = reinterpret_cast<segment_manager*>((char*)_non_file_mapped_mapping+header_size);
+      _segment_manager = reinterpret_cast<segment_manager*>((char*)_non_file_mapped_region.get_address()+header_size);
    }
 }
 
-void pinnable_mapped_file::setup_non_file_mapping() {
+bip::mapped_region pinnable_mapped_file::setup_non_file_region() {
    int common_map_opts = MAP_PRIVATE|MAP_ANONYMOUS;
-
-   _non_file_mapped_mapping_size = _file_mapped_region.get_size();
-   auto round_up_mmaped_size = [this](unsigned r) {
+   
+   void* _non_file_mapped_mapping = nullptr;
+   size_t _non_file_mapped_mapping_size = _file_mapped_region.get_size();
+   auto round_up_mmaped_size = [&_non_file_mapped_mapping_size](unsigned r) {
       _non_file_mapped_mapping_size = (_non_file_mapped_mapping_size + (r-1u))/r*r;
    };
 
@@ -211,7 +226,7 @@ void pinnable_mapped_file::setup_non_file_mapping() {
    if(_non_file_mapped_mapping != MAP_FAILED) {
       round_up_mmaped_size(_1gb);
       std::cerr << "CHAINBASE: Database \"" << _database_name << "\" using 1GB pages" << std::endl;
-      return;
+      return bip::ipcdetail::raw_mapped_region_creator::create_posix_mapped_region (_non_file_mapped_mapping, _non_file_mapped_mapping_size);
    }
 #endif
 
@@ -222,7 +237,7 @@ void pinnable_mapped_file::setup_non_file_mapping() {
    if(_non_file_mapped_mapping != MAP_FAILED) {
       round_up_mmaped_size(_2mb);
       std::cerr << "CHAINBASE: Database \"" << _database_name << "\" using 2MB pages" << std::endl;
-      return;
+      return bip::ipcdetail::raw_mapped_region_creator::create_posix_mapped_region (_non_file_mapped_mapping, _non_file_mapped_mapping_size);
    }
 #endif
 
@@ -231,7 +246,7 @@ void pinnable_mapped_file::setup_non_file_mapping() {
    _non_file_mapped_mapping = mmap(NULL, _non_file_mapped_mapping_size, PROT_READ|PROT_WRITE, common_map_opts, VM_FLAGS_SUPERPAGE_SIZE_2MB, 0);
    if(_non_file_mapped_mapping != MAP_FAILED) {
       std::cerr << "CHAINBASE: Database \"" << _database_name << "\" using 2MB pages" << std::endl;
-      return;
+      return bip::ipcdetail::raw_mapped_region_creator::create_posix_mapped_region (_non_file_mapped_mapping, _non_file_mapped_mapping_size);
    }
    _non_file_mapped_mapping_size = _file_mapped_region.get_size();  //restore to non 2MB rounded size
 #endif
@@ -240,13 +255,17 @@ void pinnable_mapped_file::setup_non_file_mapping() {
    _non_file_mapped_mapping = mmap(NULL, _non_file_mapped_mapping_size, PROT_READ|PROT_WRITE, common_map_opts, -1, 0);
    if(_non_file_mapped_mapping == MAP_FAILED)
       BOOST_THROW_EXCEPTION(std::runtime_error(std::string("Failed to map database ") + _database_name + ": " + strerror(errno)));
+   return bip::ipcdetail::raw_mapped_region_creator::create_posix_mapped_region (_non_file_mapped_mapping, _non_file_mapped_mapping_size);
+#else
+   windows_shared_memory anonymous_mapping(create_only, (char*)0, read_write, size);
+   return mapped_region(anonymous_mapping, read_write, 0, size, address);
 #endif
 }
 
 void pinnable_mapped_file::load_database_file(boost::asio::io_service& sig_ios) {
    std::cerr << "CHAINBASE: Preloading \"" << _database_name << "\" database file, this could take a moment..." << std::endl;
    char* const src = (char*)_file_mapped_region.get_address();
-   char* const dst = (char*)_non_file_mapped_mapping;
+   char* const dst = (char*)_non_file_mapped_region.get_address();
    size_t offset = 0;
    time_t t = time(nullptr);
    while(offset != _file_mapped_region.get_size()) {
@@ -274,7 +293,7 @@ bool pinnable_mapped_file::all_zeros(char* data, size_t sz) {
 
 void pinnable_mapped_file::save_database_file() {
    std::cerr << "CHAINBASE: Writing \"" << _database_name << "\" database file, this could take a moment..." << std::endl;
-   char* src = (char*)_non_file_mapped_mapping;
+   char* src = (char*)_non_file_mapped_region.get_address();
    char* dst = (char*)_file_mapped_region.get_address();
    size_t offset = 0;
    time_t t = time(nullptr);
@@ -298,12 +317,11 @@ pinnable_mapped_file::pinnable_mapped_file(pinnable_mapped_file&& o) :
    _mapped_file_lock(std::move(o._mapped_file_lock)),
    _data_file_path(std::move(o._data_file_path)),
    _database_name(std::move(o._database_name)),
-   _file_mapped_region(std::move(o._file_mapped_region))
+   _file_mapped_region(std::move(o._file_mapped_region)),
+   _non_file_mapped_region(std::move(o._non_file_mapped_region))
 {
    _segment_manager = o._segment_manager;
    _writable = o._writable;
-   _non_file_mapped_mapping = o._non_file_mapped_mapping;
-   o._non_file_mapped_mapping = nullptr;
    o._writable = false; //prevent dtor from doing anything interesting
 }
 
@@ -312,8 +330,7 @@ pinnable_mapped_file& pinnable_mapped_file::operator=(pinnable_mapped_file&& o) 
    _data_file_path = std::move(o._data_file_path);
    _database_name = std::move(o._database_name);
    _file_mapped_region = std::move(o._file_mapped_region);
-   _non_file_mapped_mapping = o._non_file_mapped_mapping;
-   o._non_file_mapped_mapping = nullptr;
+   _non_file_mapped_region = std::move(o._non_file_mapped_region);
    _segment_manager = o._segment_manager;
    _writable = o._writable;
    o._writable = false; //prevent dtor from doing anything interesting
@@ -322,22 +339,20 @@ pinnable_mapped_file& pinnable_mapped_file::operator=(pinnable_mapped_file&& o) 
 
 pinnable_mapped_file::~pinnable_mapped_file() {
    if(_writable) {
-      if(_non_file_mapped_mapping) { //in heap or locked mode
+      if (_mode == heap || _mode == locked) { //in heap or locked mode
          _file_mapped_region = bip::mapped_region(_file_mapping, bip::read_write);
          save_database_file();
-#ifndef _WIN32
-         if(munmap(_non_file_mapped_mapping, _non_file_mapped_mapping_size))
-            std::cerr << "CHAINBASE: ERROR: unmapping failed: " << strerror(errno) << std::endl;
-#endif
       }
-      else
+      else if (_mode == mapped) {
          if(_file_mapped_region.flush(0, 0, false) == false)
-            std::cerr << "CHAINBASE: ERROR: syncing buffers failed" << std::endl;
+           std::cerr << "CHAINBASE: ERROR: syncing buffers failed" << std::endl;
+      }
       set_mapped_file_db_dirty(false);
    }
 }
 
 void pinnable_mapped_file::set_mapped_file_db_dirty(bool dirty) {
+   if (_mode == ram || _mode == ram_locked) return;
    *((char*)_file_mapped_region.get_address()+header_dirty_bit_offset) = dirty;
    if(_file_mapped_region.flush(0, 0, false) == false)
       std::cerr << "CHAINBASE: ERROR: syncing buffers failed" << std::endl;
@@ -352,6 +367,10 @@ std::istream& operator>>(std::istream& in, pinnable_mapped_file::map_mode& runti
       runtime = pinnable_mapped_file::map_mode::heap;
    else if (s == "locked")
       runtime = pinnable_mapped_file::map_mode::locked;
+   else if (s == "ram")
+      runtime = pinnable_mapped_file::map_mode::ram;
+   else if (s == "ram-locked")
+      runtime = pinnable_mapped_file::map_mode::ram_locked;
    else
       in.setstate(std::ios_base::failbit);
    return in;
@@ -364,7 +383,10 @@ std::ostream& operator<<(std::ostream& osm, pinnable_mapped_file::map_mode m) {
       osm << "heap";
    else if (m == pinnable_mapped_file::map_mode::locked)
       osm << "locked";
-
+   else if (m == pinnable_mapped_file::map_mode::ram)
+      osm << "ram";
+   else if (m == pinnable_mapped_file::map_mode::ram_locked)
+      osm << "ram-locked";
    return osm;
 }
 
