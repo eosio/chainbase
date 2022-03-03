@@ -47,7 +47,13 @@ class pinnable_mapped_file {
          locked
       };
 
-      pinnable_mapped_file(const bfs::path& dir, bool writable, uint64_t shared_file_size, bool allow_dirty, map_mode mode);
+      enum class on_dirty_mode {
+         throw_on_dirty,
+         allow_dirty,
+         delete_on_dirty
+      };
+      
+      pinnable_mapped_file(const bfs::path& dir, bool writable, uint64_t shared_file_size, on_dirty_mode on_dirty, map_mode mode, bool persistent);
       pinnable_mapped_file(pinnable_mapped_file&& o);
       pinnable_mapped_file& operator=(pinnable_mapped_file&&);
       pinnable_mapped_file(const pinnable_mapped_file&) = delete;
@@ -61,12 +67,13 @@ class pinnable_mapped_file {
       void                                          load_database_file(boost::asio::io_service& sig_ios);
       void                                          save_database_file();
       bool                                          all_zeros(char* data, size_t sz);
-      void                                          setup_non_file_mapping();
+      void                                          setup_non_file_mapping(size_t sz);
 
       bip::file_lock                                _mapped_file_lock;
       bfs::path                                     _data_file_path;
       std::string                                   _database_name;
       bool                                          _writable;
+      bool                                          _persistent;
 
       bip::file_mapping                             _file_mapping;
       bip::mapped_region                            _file_mapped_region;
