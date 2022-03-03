@@ -79,7 +79,7 @@ pinnable_mapped_file::pinnable_mapped_file(const bfs::path& dir, bool writable, 
          if (on_dirty == on_dirty_mode::delete_on_dirty) {
             bfs::remove(_data_file_path);
             std::cerr << "CHAINBASE: \"" << _database_name
-                      << "\" database header is corrupted, delete the existing one and continue\n";
+                      << "\" database header is corrupted, deleting the existing one and continuing\n";
          } else {
             BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::bad_header)));
          }
@@ -97,16 +97,22 @@ pinnable_mapped_file::pinnable_mapped_file(const bfs::path& dir, bool writable, 
             } else if (on_dirty == on_dirty_mode::delete_on_dirty)  {
                bfs::remove(_data_file_path);
                std::cerr << "CHAINBASE: \"" << _database_name
-                        << "\" database is dirty, delete the existing one and continue\n";
+                        << "\" database is dirty, deleting the existing one and continuing\n";
             }
          }
          else if(dbheader->dbenviron != environment()) {
-            std::cerr << "CHAINBASE: \"" << _database_name << "\" database was created with a chainbase from a different environment" << std::endl;
-            std::cerr << "Current compiler environment:" << std::endl;
-            std::cerr << environment();
-            std::cerr << "DB created with compiler environment:" << std::endl;
-            std::cerr << dbheader->dbenviron;
-            BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::incompatible)));
+            if (on_dirty == on_dirty_mode::throw_on_dirty) {
+               std::cerr << "CHAINBASE: \"" << _database_name << "\" database was created with a chainbase from a different environment" << std::endl;
+               std::cerr << "Current compiler environment:" << std::endl;
+               std::cerr << environment();
+               std::cerr << "DB created with compiler environment:" << std::endl;
+               std::cerr << dbheader->dbenviron;
+               BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::incompatible)));
+            } else if (on_dirty == on_dirty_mode::delete_on_dirty)  {
+               bfs::remove(_data_file_path);
+               std::cerr << "CHAINBASE: \"" << _database_name
+                         << "\" database was created with a chainbase from a different environment, deleting the existing one and continuing\n";
+            }
          }
       }
    }
