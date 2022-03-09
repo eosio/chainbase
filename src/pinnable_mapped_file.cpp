@@ -17,7 +17,7 @@ const char* chainbase_error_category::name() const noexcept {
 
 std::string chainbase_error_category::message(int ev) const {
    switch(ev) {
-      case db_error_code::ok: 
+      case db_error_code::ok:
          return "Ok";
       case db_error_code::dirty:
          return "Database dirty flag set";
@@ -52,14 +52,14 @@ const std::error_category& chainbase_error_category() {
 pinnable_mapped_file::pinnable_mapped_file(const bfs::path& dir, bool writable, uint64_t shared_file_size, on_dirty_mode on_dirty, map_mode mode, bool persistent) :
    _data_file_path(bfs::absolute(dir/"shared_memory.bin") ),
    _database_name(dir.filename().string()),
-   _writable(writable), 
+   _writable(writable),
    _persistent(persistent)
 {
    if(shared_file_size % _db_size_multiple_requirement) {
       std::string what_str("Database must be mulitple of " + std::to_string(_db_size_multiple_requirement) + " bytes");
       BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::bad_size), what_str));
    }
-   
+
 #ifdef _WIN32
    if(mode != mapped)
       BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::unsupported_win32_mode)));
@@ -84,7 +84,7 @@ pinnable_mapped_file::pinnable_mapped_file(const bfs::path& dir, bool writable, 
             BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::bad_header)));
          }
       }
-      else {   
+      else {
          db_header* dbheader = reinterpret_cast<db_header*>(header);
          if(dbheader->id != header_id) {
             std::string what_str("\"" + _database_name + "\" database format not compatible with this version of chainbase.");
@@ -252,7 +252,7 @@ void pinnable_mapped_file::setup_non_file_mapping(size_t sz) {
       std::cerr << "CHAINBASE: Database \"" << _database_name << "\" using 2MB pages" << std::endl;
       return;
    }
-   _non_file_mapped_mapping_size = _file_mapped_region.get_size();  //restore to non 2MB rounded size
+   _non_file_mapped_mapping_size = sz;  //restore to non 2MB rounded size
 #endif
 
 #ifndef _WIN32
