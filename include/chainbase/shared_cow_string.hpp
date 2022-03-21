@@ -19,7 +19,7 @@ namespace chainbase {
       struct impl {
          uint32_t reference_count;
          uint32_t size;
-         char data[0];
+         char data[1];
       };
     public:
       using allocator_type = bip::allocator<char, pinnable_mapped_file::segment_manager>;
