@@ -259,8 +259,10 @@ namespace chainbase {
 
          using database_index_row_count_multiset = std::multiset<std::pair<unsigned, std::string>>;
 
-         database(const bfs::path& dir, open_flags write = read_only, uint64_t shared_file_size = 0, bool allow_dirty = false,
-                  pinnable_mapped_file::map_mode = pinnable_mapped_file::map_mode::mapped);
+         database(const bfs::path& dir, open_flags write = read_only, uint64_t shared_file_size = 0,
+                  pinnable_mapped_file::on_dirty_mode on_dirty = pinnable_mapped_file::on_dirty_mode::throw_on_dirty,
+                  pinnable_mapped_file::map_mode = pinnable_mapped_file::map_mode::mapped,
+                  bool persistent = true);
          ~database();
          database(database&&) = default;
          database& operator=(database&&) = default;
@@ -408,11 +410,11 @@ namespace chainbase {
             _index_list.push_back( new_index );
          }
 
-         auto get_segment_manager() -> decltype( ((pinnable_mapped_file*)nullptr)->get_segment_manager()) {
+         pinnable_mapped_file::segment_manager* get_segment_manager() {
             return _db_file.get_segment_manager();
          }
 
-         auto get_segment_manager()const -> std::add_const_t< decltype( ((pinnable_mapped_file*)nullptr)->get_segment_manager() ) > {
+         const pinnable_mapped_file::segment_manager* get_segment_manager() const {
             return _db_file.get_segment_manager();
          }
 

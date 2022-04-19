@@ -15,14 +15,14 @@ BOOST_DATA_TEST_CASE(grow_shrink, boost::unit_test::data::make(test_modes), map_
       const size_t db_shrunk_size = 2u*1024u*1024u;
 
       {
-         chainbase::database db(temp, database::read_write, db_start_size, false, map_mode);
+         chainbase::database db(temp, database::read_write, db_start_size, pinnable_mapped_file::on_dirty_mode::throw_on_dirty, map_mode);
       }
       {
-         chainbase::database db(temp, database::read_write, db_grow_size, false, map_mode);
+         chainbase::database db(temp, database::read_write, db_grow_size, pinnable_mapped_file::on_dirty_mode::throw_on_dirty, map_mode);
 	 BOOST_CHECK(db.get_free_memory() > db_start_size);
       }
       {
-         chainbase::database db(temp, database::read_write, db_shrunk_size, false, map_mode);
+         chainbase::database db(temp, database::read_write, db_shrunk_size, pinnable_mapped_file::on_dirty_mode::throw_on_dirty, map_mode);
 	 BOOST_CHECK(db.get_free_memory() > db_start_size);
       }
 

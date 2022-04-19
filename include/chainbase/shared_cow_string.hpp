@@ -19,7 +19,10 @@ namespace chainbase {
       struct impl {
          uint32_t reference_count;
          uint32_t size;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
          char data[0];
+#pragma GCC diagnostic pop
       };
     public:
       using allocator_type = bip::allocator<char, pinnable_mapped_file::segment_manager>;

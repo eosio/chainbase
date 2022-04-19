@@ -9,9 +9,9 @@
 
 namespace chainbase {
 
-   database::database(const bfs::path& dir, open_flags flags, uint64_t shared_file_size, bool allow_dirty,
-                      pinnable_mapped_file::map_mode db_map_mode) :
-      _db_file(dir, flags & database::read_write, shared_file_size, allow_dirty, db_map_mode),
+   database::database(const bfs::path& dir, open_flags flags, uint64_t shared_file_size, pinnable_mapped_file::on_dirty_mode on_dirty,
+                      pinnable_mapped_file::map_mode db_map_mode, bool persistent) :
+      _db_file(dir, flags & database::read_write, shared_file_size, on_dirty, db_map_mode, persistent),
       _read_only(flags == database::read_only)
    {
    }

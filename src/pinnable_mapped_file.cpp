@@ -17,7 +17,7 @@ const char* chainbase_error_category::name() const noexcept {
 
 std::string chainbase_error_category::message(int ev) const {
    switch(ev) {
-      case db_error_code::ok: 
+      case db_error_code::ok:
          return "Ok";
       case db_error_code::dirty:
          return "Database dirty flag set";
@@ -49,15 +49,17 @@ const std::error_category& chainbase_error_category() {
    return the_category;
 }
 
-pinnable_mapped_file::pinnable_mapped_file(const bfs::path& dir, bool writable, uint64_t shared_file_size, bool allow_dirty, map_mode mode) :
-   _data_file_path(bfs::absolute(dir/"shared_memory.bin")),
+pinnable_mapped_file::pinnable_mapped_file(const bfs::path& dir, bool writable, uint64_t shared_file_size, on_dirty_mode on_dirty, map_mode mode, bool persistent) :
+   _data_file_path(bfs::absolute(dir/"shared_memory.bin") ),
    _database_name(dir.filename().string()),
-   _writable(writable)
+   _writable(writable),
+   _persistent(persistent)
 {
    if(shared_file_size % _db_size_multiple_requirement) {
       std::string what_str("Database must be mulitple of " + std::to_string(_db_size_multiple_requirement) + " bytes");
       BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::bad_size), what_str));
    }
+
 #ifdef _WIN32
    if(mode != mapped)
       BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::unsupported_win32_mode)));
@@ -73,25 +75,45 @@ pinnable_mapped_file::pinnable_mapped_file(const bfs::path& dir, bool writable, 
       char header[header_size];
       std::ifstream hs(_data_file_path.generic_string(), std::ifstream::binary);
       hs.read(header, header_size);
-      if(hs.fail())
-         BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::bad_header)));
-
-      db_header* dbheader = reinterpret_cast<db_header*>(header);
-      if(dbheader->id != header_id) {
-         std::string what_str("\"" + _database_name + "\" database format not compatible with this version of chainbase.");
-         BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::incorrect_db_version), what_str));
+      if (hs.fail()) {
+         if (on_dirty == on_dirty_mode::delete_on_dirty) {
+            bfs::remove(_data_file_path);
+            std::cerr << "CHAINBASE: \"" << _database_name
+                      << "\" database header is corrupted, deleting the existing one and continuing\n";
+         } else {
+            BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::bad_header)));
+         }
       }
-      if(!allow_dirty && dbheader->dirty) {
-         std::string what_str("\"" + _database_name + "\" database dirty flag set");
-         BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::dirty)));
-      }
-      if(dbheader->dbenviron != environment()) {
-         std::cerr << "CHAINBASE: \"" << _database_name << "\" database was created with a chainbase from a different environment" << std::endl;
-         std::cerr << "Current compiler environment:" << std::endl;
-         std::cerr << environment();
-         std::cerr << "DB created with compiler environment:" << std::endl;
-         std::cerr << dbheader->dbenviron;
-         BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::incompatible)));
+      else {
+         db_header* dbheader = reinterpret_cast<db_header*>(header);
+         if(dbheader->id != header_id) {
+            std::string what_str("\"" + _database_name + "\" database format not compatible with this version of chainbase.");
+            BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::incorrect_db_version), what_str));
+         }
+         if (dbheader->dirty) {
+            if (on_dirty == on_dirty_mode::throw_on_dirty) {
+               std::string what_str("\"" + _database_name + "\" database dirty flag set: ");
+               BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::dirty), what_str));
+            } else if (on_dirty == on_dirty_mode::delete_on_dirty)  {
+               bfs::remove(_data_file_path);
+               std::cerr << "CHAINBASE: \"" << _database_name
+                        << "\" database is dirty, deleting the existing one and continuing\n";
+            }
+         }
+         else if(dbheader->dbenviron != environment()) {
+            if (on_dirty == on_dirty_mode::throw_on_dirty) {
+               std::cerr << "CHAINBASE: \"" << _database_name << "\" database was created with a chainbase from a different environment" << std::endl;
+               std::cerr << "Current compiler environment:" << std::endl;
+               std::cerr << environment();
+               std::cerr << "DB created with compiler environment:" << std::endl;
+               std::cerr << dbheader->dbenviron;
+               BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::incompatible)));
+            } else if (on_dirty == on_dirty_mode::delete_on_dirty)  {
+               bfs::remove(_data_file_path);
+               std::cerr << "CHAINBASE: \"" << _database_name
+                         << "\" database was created with a chainbase from a different environment, deleting the existing one and continuing\n";
+            }
+         }
       }
    }
 
@@ -100,11 +122,13 @@ pinnable_mapped_file::pinnable_mapped_file(const bfs::path& dir, bool writable, 
       std::ofstream ofs(_data_file_path.generic_string(), std::ofstream::trunc);
       //win32 impl of bfs::resize_file() doesn't like the file being open
       ofs.close();
-      bfs::resize_file(_data_file_path, shared_file_size);
-      _file_mapping = bip::file_mapping(_data_file_path.generic_string().c_str(), bip::read_write);
-      _file_mapped_region = bip::mapped_region(_file_mapping, bip::read_write);
-      file_mapped_segment_manager = new ((char*)_file_mapped_region.get_address()+header_size) segment_manager(shared_file_size-header_size);
-      new (_file_mapped_region.get_address()) db_header;
+      if (persistent) {
+         bfs::resize_file(_data_file_path, shared_file_size);
+         _file_mapping = bip::file_mapping(_data_file_path.generic_string().c_str(), bip::read_write);
+         _file_mapped_region = bip::mapped_region(_file_mapping, bip::read_write);
+         file_mapped_segment_manager = new ((char*)_file_mapped_region.get_address()+header_size) segment_manager(shared_file_size-header_size);
+         new (_file_mapped_region.get_address()) db_header;
+      }
    }
    else if(_writable) {
          auto existing_file_size = bfs::file_size(_data_file_path);
@@ -130,6 +154,7 @@ pinnable_mapped_file::pinnable_mapped_file(const bfs::path& dir, bool writable, 
          file_mapped_segment_manager = reinterpret_cast<segment_manager*>((char*)_file_mapped_region.get_address()+header_size);
    }
 
+   auto existing_file_size = bfs::file_size(_data_file_path);
    if(_writable) {
       //remove meta file created in earlier versions
       boost::system::error_code ec;
@@ -139,7 +164,7 @@ pinnable_mapped_file::pinnable_mapped_file(const bfs::path& dir, bool writable, 
       if(!_mapped_file_lock.try_lock())
          BOOST_THROW_EXCEPTION(std::system_error(make_error_code(db_error_code::no_access)));
 
-      set_mapped_file_db_dirty(true);
+      if (existing_file_size) set_mapped_file_db_dirty(true);
    }
 
    if(mode == mapped) {
@@ -156,8 +181,16 @@ pinnable_mapped_file::pinnable_mapped_file(const bfs::path& dir, bool writable, 
       });
 
       try {
-         setup_non_file_mapping();
-         load_database_file(sig_ios);
+         auto existing_file_size = bfs::file_size(_data_file_path);
+         if (existing_file_size) {
+            setup_non_file_mapping(existing_file_size);
+            load_database_file(sig_ios);
+         }
+         else {
+            setup_non_file_mapping(shared_file_size);
+            file_mapped_segment_manager = new ((char*)_non_file_mapped_mapping+header_size) segment_manager(shared_file_size-header_size);
+            new (_non_file_mapped_mapping) db_header;
+         }
 
 #ifndef _WIN32
          if(mode == locked) {
@@ -181,10 +214,10 @@ pinnable_mapped_file::pinnable_mapped_file(const bfs::path& dir, bool writable, 
    }
 }
 
-void pinnable_mapped_file::setup_non_file_mapping() {
+void pinnable_mapped_file::setup_non_file_mapping(size_t sz) {
    int common_map_opts = MAP_PRIVATE|MAP_ANONYMOUS;
 
-   _non_file_mapped_mapping_size = _file_mapped_region.get_size();
+   _non_file_mapped_mapping_size = sz;
    auto round_up_mmaped_size = [this](unsigned r) {
       _non_file_mapped_mapping_size = (_non_file_mapped_mapping_size + (r-1u))/r*r;
    };
@@ -219,7 +252,7 @@ void pinnable_mapped_file::setup_non_file_mapping() {
       std::cerr << "CHAINBASE: Database \"" << _database_name << "\" using 2MB pages" << std::endl;
       return;
    }
-   _non_file_mapped_mapping_size = _file_mapped_region.get_size();  //restore to non 2MB rounded size
+   _non_file_mapped_mapping_size = sz;  //restore to non 2MB rounded size
 #endif
 
 #ifndef _WIN32
@@ -288,6 +321,7 @@ pinnable_mapped_file::pinnable_mapped_file(pinnable_mapped_file&& o) :
 {
    _segment_manager = o._segment_manager;
    _writable = o._writable;
+   _persistent = o._persistent;
    _non_file_mapped_mapping = o._non_file_mapped_mapping;
    o._non_file_mapped_mapping = nullptr;
    o._writable = false; //prevent dtor from doing anything interesting
@@ -302,6 +336,7 @@ pinnable_mapped_file& pinnable_mapped_file::operator=(pinnable_mapped_file&& o) 
    o._non_file_mapped_mapping = nullptr;
    _segment_manager = o._segment_manager;
    _writable = o._writable;
+   _persistent = o._persistent;
    o._writable = false; //prevent dtor from doing anything interesting
    return *this;
 }
@@ -309,8 +344,10 @@ pinnable_mapped_file& pinnable_mapped_file::operator=(pinnable_mapped_file&& o) 
 pinnable_mapped_file::~pinnable_mapped_file() {
    if(_writable) {
       if(_non_file_mapped_mapping) { //in heap or locked mode
-         _file_mapped_region = bip::mapped_region(_file_mapping, bip::read_write);
-         save_database_file();
+         if (_persistent) {
+            _file_mapped_region = bip::mapped_region(_file_mapping, bip::read_write);
+            save_database_file();
+         }
 #ifndef _WIN32
          if(munmap(_non_file_mapped_mapping, _non_file_mapped_mapping_size))
             std::cerr << "CHAINBASE: ERROR: unmapping failed: " << strerror(errno) << std::endl;
@@ -319,7 +356,8 @@ pinnable_mapped_file::~pinnable_mapped_file() {
       else
          if(_file_mapped_region.flush(0, 0, false) == false)
             std::cerr << "CHAINBASE: ERROR: syncing buffers failed" << std::endl;
-      set_mapped_file_db_dirty(false);
+      if (_persistent)
+         set_mapped_file_db_dirty(false);
    }
 }
 
